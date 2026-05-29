@@ -1,10 +1,10 @@
 name: app_escalada
-description: "App para la comunidad de escalada"
+description: "App de Escalada Outdoor e Indoor"
 publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: '>=3.10.0 <4.0.0' # Ajustado para tu versión 3.12.0
+  sdk: '>=3.10.0 <4.0.0'
 
 dependencies:
   flutter:
@@ -14,6 +14,8 @@ dependencies:
   latlong2: ^0.9.1
   supabase_flutter: ^2.6.0
   shared_preferences: ^2.3.2
+  geolocator: ^13.0.1
+  url_launcher: ^6.3.1
 
 dev_dependencies:
   flutter_test:

@@ -4,6 +4,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:geolocator/geolocator.dart'; // Librería de GPS
+import 'package:url_launcher/url_launcher.dart'; // Librería para abrir webs
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,7 +22,10 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.green),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: const Color(0xFF2E7D32),
+      ),
       home: const MapScreen(),
     );
   }
@@ -34,9 +39,13 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final supabase = Supabase.instance.client;
-  final MapController mapController = MapController(); // Para mover el mapa
+  final MapController mapController = MapController(); 
   List<dynamic> spots = [];
+  List<dynamic> spotsFiltrados = [];
   bool cargando = true;
+  
+  // Variables para filtros y búsqueda
+  String busqueda = "";
   bool verRoca = true;
   bool verRocodromos = true;
   bool modoTopo = false;
@@ -44,46 +53,58 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
-    _cargarDatosConCache();
+    _cargarDatos();
   }
 
-  // ESTRATEGIA 3G/OFFLINE
-  Future<void> _cargarDatosConCache() async {
+  Future<void> _cargarDatos() async {
     final prefs = await SharedPreferences.getInstance();
     final cache = prefs.getString('cache_spots');
     if (cache != null) {
       setState(() {
         spots = jsonDecode(cache);
+        spotsFiltrados = spots;
         cargando = false;
       });
     }
-    _leerDatosDeSupabase();
+    _leerDeSupabase();
   }
 
-  Future<void> _leerDatosDeSupabase() async {
+  Future<void> _leerDeSupabase() async {
     try {
       final data = await supabase.from('spots').select();
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('cache_spots', jsonEncode(data));
-      setState(() { spots = data; cargando = false; });
+      setState(() { 
+        spots = data; 
+        _filtrar();
+        cargando = false; 
+      });
     } catch (e) {
-      debugPrint('Error: $e');
+      debugPrint('Error Supabase: $e');
       setState(() => cargando = false);
     }
   }
 
-  // FUNCIÓN PARA ELIMINAR FÍSICAMENTE EL PUNTO
-  Future<void> _borrarPunto(String id) async {
-    try {
-      await supabase.from('spots').delete().eq('id', id);
-      _leerDatosDeSupabase(); // Refrescar mapa
-      if (!mounted) return;
-      Navigator.pop(context); // Cerrar hoja de detalles
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Sector eliminado correctamente'), backgroundColor: Colors.orange),
-      );
-    } catch (e) {
-      debugPrint('Error al borrar: $e');
+  void _filtrar() {
+    setState(() {
+      spotsFiltrados = spots.where((s) {
+        final matchesBusqueda = s['nombre'].toString().toLowerCase().contains(busqueda.toLowerCase()) ||
+                               (s['provincia'] ?? "").toString().toLowerCase().contains(busqueda.toLowerCase());
+        final matchesTipo = (s['tipo'] == 'sector_outdoor' && verRoca) || (s['tipo'] == 'rocodromo' && verRocodromos);
+        return matchesBusqueda && matchesTipo;
+      }).toList();
+    });
+  }
+
+  // FUNCIÓN GPS
+  Future<void> _irAMiUbicacion() async {
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+      Position pos = await Geolocator.getCurrentPosition();
+      mapController.move(LatLng(pos.latitude, pos.longitude), 14.0);
     }
   }
 
@@ -91,16 +112,21 @@ class _MapScreenState extends State<MapScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Escalada Map'),
+        title: TextField(
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'Buscar por nombre o provincia...',
+            hintStyle: TextStyle(color: Colors.white70),
+            border: InputBorder.none,
+          ),
+          onChanged: (v) {
+            busqueda = v;
+            _filtrar();
+          },
+        ),
         actions: [
-          IconButton(
-            icon: Icon(modoTopo ? Icons.map : Icons.terrain),
-            onPressed: () => setState(() => modoTopo = !modoTopo),
-          ),
-          IconButton(
-            icon: const Icon(Icons.filter_list),
-            onPressed: () => _mostrarFiltros(context),
-          ),
+          IconButton(icon: Icon(modoTopo ? Icons.map : Icons.terrain), onPressed: () => setState(() => modoTopo = !modoTopo)),
+          IconButton(icon: const Icon(Icons.filter_list), onPressed: () => _mostrarFiltros()),
         ],
       ),
       body: cargando 
@@ -120,23 +146,25 @@ class _MapScreenState extends State<MapScreen> {
                 subdomains: const ['a', 'b', 'c'],
               ),
               MarkerLayer(
-                markers: spots.where((s) {
-                  if (s['tipo'] == 'sector_outdoor' && !verRoca) return false;
-                  if (s['tipo'] == 'rocodromo' && !verRocodromos) return false;
-                  return true;
-                }).map((s) {
+                markers: spotsFiltrados.map((s) {
                   return Marker(
                     point: LatLng(s['latitud'], s['longitud']),
                     child: GestureDetector(
                       onTap: () {
-                        // CENTRAR MAPA AUTOMÁTICAMENTE
-                        mapController.move(LatLng(s['latitud'], s['longitud']), 13.0);
+                        mapController.move(LatLng(s['latitud'], s['longitud']), 16.0);
                         _mostrarDetalles(s);
                       },
-                      child: Icon(
-                        s['tipo'] == 'sector_outdoor' ? Icons.terrain : Icons.fitness_center,
-                        color: s['tipo'] == 'sector_outdoor' ? Colors.brown : Colors.blue,
-                        size: 35,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.8),
+                          shape: BoxShape.circle,
+                          boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                        ),
+                        child: Icon(
+                          s['tipo'] == 'sector_outdoor' ? Icons.terrain : Icons.fitness_center,
+                          color: s['tipo'] == 'sector_outdoor' ? const Color(0xFF795548) : const Color(0xFF1976D2),
+                          size: 28,
+                        ),
                       ),
                     ),
                   );
@@ -144,63 +172,42 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ],
           ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _irAMiUbicacion,
+        child: const Icon(Icons.my_location),
+      ),
     );
   }
 
   void _mostrarFormularioNuevo(LatLng punto) {
     String nombre = "";
     String tipo = "sector_outdoor";
-    bool agua = false;
-    bool mascotas = false;
-    String internet = "no";
+    String pais = "";
+    String provincia = "";
+    String url = "";
 
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(builder: (context, setStateForm) {
         return AlertDialog(
-          title: const Text('Registrar Nuevo Sector'),
-          content: SizedBox(
-            width: 400,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    decoration: const InputDecoration(labelText: 'Nombre del lugar', border: OutlineInputBorder()),
-                    onChanged: (v) => nombre = v,
-                  ),
-                  const SizedBox(height: 15),
-                  DropdownButtonFormField<String>(
-                    initialValue: tipo,
-                    decoration: const InputDecoration(labelText: '¿Qué es?', border: OutlineInputBorder()),
-                    items: const [
-                      DropdownMenuItem(value: 'sector_outdoor', child: Text('Sector Roca')),
-                      DropdownMenuItem(value: 'rocodromo', child: Text('Rocódromo')),
-                    ],
-                    onChanged: (v) => tipo = v!,
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Agua Potable'),
-                    value: agua,
-                    onChanged: (v) => setStateForm(() => agua = v!),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Mascotas'),
-                    value: mascotas,
-                    onChanged: (v) => setStateForm(() => mascotas = v!),
-                  ),
-                  DropdownButtonFormField<String>(
-                    initialValue: internet,
-                    decoration: const InputDecoration(labelText: 'Internet'),
-                    items: const [
-                      DropdownMenuItem(value: 'no', child: Text('No')),
-                      DropdownMenuItem(value: 'gratis', child: Text('Gratis')),
-                      DropdownMenuItem(value: 'pago', child: Text('Pago')),
-                    ],
-                    onChanged: (v) => setStateForm(() => internet = v!),
-                  ),
-                ],
-              ),
+          title: const Text('Nuevo Punto'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(decoration: const InputDecoration(labelText: 'Nombre'), onChanged: (v) => nombre = v),
+                TextField(decoration: const InputDecoration(labelText: 'País'), onChanged: (v) => pais = v),
+                TextField(decoration: const InputDecoration(labelText: 'Provincia'), onChanged: (v) => provincia = v),
+                TextField(decoration: const InputDecoration(labelText: 'URL TheCrag'), onChanged: (v) => url = v),
+                DropdownButtonFormField<String>(
+                  initialValue: tipo,
+                  items: const [
+                    DropdownMenuItem(value: 'sector_outdoor', child: Text('Roca')),
+                    DropdownMenuItem(value: 'rocodromo', child: Text('Rocódromo')),
+                  ],
+                  onChanged: (v) => tipo = v!,
+                ),
+              ],
             ),
           ),
           actions: [
@@ -210,11 +217,10 @@ class _MapScreenState extends State<MapScreen> {
                 if (nombre.isNotEmpty) {
                   await supabase.from('spots').insert({
                     'nombre': nombre, 'tipo': tipo, 'latitud': punto.latitude, 'longitud': punto.longitude,
-                    'tiene_agua_potable': agua, 'pet_friendly': mascotas, 'internet_status': internet
+                    'pais': pais, 'provincia': provincia, 'thecrag_url': url
                   });
-                  _leerDatosDeSupabase();
-                  if (!context.mounted) return;
-                  Navigator.pop(context);
+                  _leerDeSupabase();
+                  if (context.mounted) Navigator.pop(context);
                 }
               }, 
               child: const Text('Guardar')
@@ -225,134 +231,41 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  void _mostrarDetalles(dynamic s) async {
-    List<dynamic> comentarios = [];
-    final res = await supabase.from('comentarios').select().eq('spot_id', s['id']).order('fecha', ascending: false);
-    comentarios = res;
-    if (!mounted) return;
-
+  void _mostrarDetalles(dynamic s) {
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(25))),
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) {
-          final comController = TextEditingController();
-          return Padding(
-            padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, top: 20, left: 20, right: 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(child: Text(s['nombre'], style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold))),
-                    // BOTÓN DE BORRAR (PROTEGIDO)
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline, color: Colors.red),
-                      onPressed: () => _confirmarBorrado(s['id']),
-                    ),
-                  ],
-                ),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    if (s['tiene_agua_potable'] == true) const Chip(label: Text('Agua'), avatar: Icon(Icons.water_drop, size: 14)),
-                    if (s['pet_friendly'] == true) const Chip(label: Text('Mascotas'), avatar: Icon(Icons.pets, size: 14)),
-                    if (s['internet_status'] != 'no') Chip(label: Text('Internet: ${s['internet_status']}'), avatar: const Icon(Icons.wifi, size: 14)),
-                  ],
-                ),
-                const Divider(),
-                const Text('COMENTARIOS / AYUDAS', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                Container(
-                  constraints: const BoxConstraints(maxHeight: 150),
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: comentarios.length,
-                    itemBuilder: (context, i) => ListTile(
-                      title: Text(comentarios[i]['texto']),
-                      subtitle: Text('Actualización: ${comentarios[i]['fecha'].toString().substring(0,16)}', 
-                        style: const TextStyle(fontStyle: FontStyle.italic, fontSize: 10)),
-                    ),
-                  ),
-                ),
-                TextField(
-                  controller: comController,
-                  decoration: InputDecoration(
-                    hintText: 'Escribe algo útil...',
-                    suffixIcon: IconButton(
-                      icon: const Icon(Icons.send),
-                      onPressed: () async {
-                        if (comController.text.isNotEmpty) {
-                          await supabase.from('comentarios').insert({'spot_id': s['id'], 'texto': comController.text});
-                          final n = await supabase.from('comentarios').select().eq('spot_id', s['id']).order('fecha', ascending: false);
-                          setModalState(() { comentarios = n; comController.clear(); });
-                        }
-                      },
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  // DIALOGO PARA PEDIR CLAVE DE BORRADO
-  void _confirmarBorrado(String id) {
-    String claveIntroducida = "";
-    const String claveMaestra = "159357"; // CAMBIA ESTA CLAVE POR LA QUE QUIERAS
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Eliminar Sector'),
-        content: Column(
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Introduce la clave de administrador para borrar este punto:'),
+            Text(s['nombre'], style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            Text('${s['provincia'] ?? 'Provincia'}, ${s['pais'] ?? 'País'}', style: const TextStyle(color: Colors.grey)),
             const SizedBox(height: 15),
-            TextField(
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'Clave Secreta', border: OutlineInputBorder()),
-              onChanged: (v) => claveIntroducida = v,
-            ),
+            if (s['thecrag_url'] != null && s['thecrag_url'] != "")
+              ElevatedButton.icon(
+                onPressed: () => launchUrl(Uri.parse(s['thecrag_url'])),
+                icon: const Icon(Icons.link),
+                label: const Text('Ver en TheCrag'),
+              ),
+            const SizedBox(height: 10),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-            onPressed: () {
-              if (claveIntroducida == claveMaestra) {
-                _borrarPunto(id);
-                Navigator.pop(context);
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Clave incorrecta')));
-              }
-            }, 
-            child: const Text('Confirmar Borrado')
-          ),
-        ],
       ),
     );
   }
 
-  void _mostrarFiltros(BuildContext context) {
+  void _mostrarFiltros() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => StatefulBuilder(builder: (context, setMS) => Column(
+      builder: (context) => Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SwitchListTile(title: const Text('Ver Roca'), value: verRoca, onChanged: (v) { setState(()=>verRoca=v); setMS(()=>verRoca=v); }),
-          SwitchListTile(title: const Text('Ver Rocódromos'), value: verRocodromos, onChanged: (v) { setState(()=>verRocodromos=v); setMS(()=>verRocodromos=v); }),
-          const SizedBox(height: 20),
+          SwitchListTile(title: const Text('Roca'), value: verRoca, onChanged: (v) { setState(()=>verRoca=v); _filtrar(); Navigator.pop(context); }),
+          SwitchListTile(title: const Text('Indoor'), value: verRocodromos, onChanged: (v) { setState(()=>verRocodromos=v); _filtrar(); Navigator.pop(context); }),
         ],
-      )),
+      ),
     );
   }
 }
